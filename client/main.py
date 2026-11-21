@@ -1,3 +1,4 @@
+import json
 import streamlit as st
 import os
 from pathlib import Path
@@ -10,7 +11,13 @@ load_dotenv(root_dir / ".env")
 
 URL = os.getenv("BASE_URL", "http://127.0.0.1:8000")
 
-st.set_page_config(page_title="MEDICAL HEALTHCARE RAG CHATBOT !!", layout="centered")
+st.set_page_config(page_title="MediGuide", layout="centered")
+
+if os.getenv("MEDIGUIDE_WALKTHROUGH") == "1":
+    st.info("Local walkthrough with synthetic data and scripted answers. Use the bundled specimen log.")
+    sample_path = root_dir / "demo" / "specimen-log.pdf"
+    st.download_button("Download sample report", sample_path.read_bytes(), file_name=sample_path.name,
+                       mime="application/pdf")
 
 if "username" not in st.session_state:
     st.session_state.username = ""
@@ -25,7 +32,7 @@ def get_auth():
 
 
 def auth_ui():
-    st.title("Medical RAG Assistance")
+    st.title("MediGuide")
     st.subheader("Login or Signup")
 
     tab1, tab2 = st.tabs(["Login", "Signup"])
@@ -42,16 +49,16 @@ def auth_ui():
                 st.session_state.role = user_data["role"]
                 st.session_state.logged_in = True
                 st.session_state.mode = "chat"
-                st.success(f"Welcome {username}")
+                st.rerun()
             else:
                 st.error(res.json().get("detail", "Login failed"))
 
     with tab2:
         new_user = st.text_input("New Username", key="signup_user")
         new_pass = st.text_input("New Pass", type="password", key="signup_pass")
-        new_role = st.selectbox("Choose Role", ["admin", "doctor", "nurse", "patient", "other"])
+        st.caption("New accounts are registered as patients.")
         if st.button("Signup"):
-            payload = {"username": new_user, "password": new_pass, "role": new_role}
+            payload = {"username": new_user, "password": new_pass, "role": "patient"}
             res = requests.post(f"{URL}/signup", json=payload)
 
             if res.status_code == 200:
@@ -94,16 +101,10 @@ def upload_report():
             files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
             res = requests.post(f"{URL}/docs/report", files=files, auth=get_auth())
 
-            if res.status_code == 200:
-                doc_info = res.json()
-                st.success(f"Report uploaded: {uploaded_file.name}")
-                st.info(f"Doc Id: {doc_info.get('doc_id')}, Role: {doc_info.get('role')}")
-                if doc_info.get("warning"):
-                    st.warning(doc_info["warning"])
-                st.markdown("### Summary")
-                st.write(doc_info.get("summary", "No summary returned."))
+            if res.status_code == 202:
+                st.success("Report saved. Open My Reports to check its progress.")
             else:
-                st.error(res.json().get("error", "Upload failed!"))
+                st.error(res.json().get("detail", "Upload failed."))
         else:
             st.warning("Please upload a PDF file.")
 
@@ -116,6 +117,7 @@ def view_reports(report_type=None):
         key=f"search_{report_type}" if report_type else "search_all"
     ).strip().lower()
 
+    st.button("Refresh reports", key=f"refresh_{report_type}")
     res = requests.get(f"{URL}/docs/reports", auth=get_auth())
     if res.status_code != 200:
         st.error(res.json().get("error", "Unable to load reports."))
@@ -141,66 +143,119 @@ def view_reports(report_type=None):
         st.info("No reports found for this filter.")
         return
 
-    if report_type is None:
-        grouped = {}
-        for report in filtered:
-            report_type_key = report.get("type", "unknown")
-            grouped.setdefault(report_type_key, []).append(report)
+    grouped = {}
+    for report in filtered:
+        report_type_key = report.get("type", "unknown")
+        grouped.setdefault(report_type_key, []).append(report)
 
-        if "reference" in grouped:
-            st.markdown("### Reference Documents")
-            for report in grouped["reference"]:
-                with st.expander(f"{report.get('filename')} ({report.get('role')})"):
-                    st.write(f"**Uploaded by:** {report.get('owner')}")
-                    st.write(f"**Role:** {report.get('role')}")
-                    st.write(f"**Uploaded at:** {report.get('uploaded_at')}")
-                    st.write("This document is stored as reference material for role-based access.")
+    if "reference" in grouped:
+        st.markdown("### Reference Documents")
+        for report in grouped["reference"]:
+            with st.expander(f"{report.get('filename')} ({report.get('role')})"):
+                st.write(f"**Uploaded by:** {report.get('owner')}")
+                st.write(f"**Role:** {report.get('role')}")
+                st.write(f"**Uploaded at:** {report.get('uploaded_at')}")
+                st.write("This document is stored as reference material for role-based access.")
 
-        if "patient_report" in grouped:
-            st.markdown("### Patient Reports")
-            for report in grouped["patient_report"]:
-                with st.expander(f"{report.get('filename')} ({report.get('uploaded_at')})"):
-                    st.write(f"**Uploaded by:** {report.get('owner')}")
-                    st.write(f"**Role:** {report.get('role')}")
-                    st.write(f"**Uploaded at:** {report.get('uploaded_at')}")
+    if "patient_report" in grouped:
+        st.markdown("### Patient Reports")
+        for report in grouped["patient_report"]:
+            with st.expander(f"{report.get('filename')} ({report.get('uploaded_at')})"):
+                st.write(f"**Uploaded by:** {report.get('owner')}")
+                st.write(f"**Role:** {report.get('role')}")
+                st.write(f"**Uploaded at:** {report.get('uploaded_at')}")
+                status = report.get("status", "complete")
+                labels = {
+                    "queued": "Waiting to index",
+                    "indexing": "Indexing report",
+                    "indexed": "Ready for questions. Summary queued.",
+                    "summarizing": "Ready for questions. Summary in progress.",
+                    "index_failed": "Indexing failed. Check that the PDF has readable text.",
+                    "summary_failed": "Ready for questions. Summary generation failed.",
+                }
+                if status in labels:
+                    st.info(labels[status])
+                    if status.endswith("_failed") and report["owner"] == st.session_state.username:
+                        if st.button("Retry processing", key=f"retry_{report['doc_id']}"):
+                            response = requests.post(f"{URL}/docs/reports/{report['doc_id']}/retry", auth=get_auth(), timeout=10)
+                            if response.status_code == 202:
+                                st.rerun()
+                            st.error("Could not retry. Refresh the report status.")
+                elif report.get("summary"):
                     st.markdown("**Summary**")
-                    st.write(report.get('summary', 'No summary available.'))
+                    st.write(report["summary"])
 
-        if "unknown" in grouped:
-            st.markdown("### Other Reports")
-            for report in grouped["unknown"]:
-                with st.expander(f"{report.get('filename')} ({report.get('type')})"):
-                    st.write(f"**Uploaded by:** {report.get('owner')}")
-                    st.write(f"**Role:** {report.get('role')}")
-                    st.write(f"**Uploaded at:** {report.get('uploaded_at')}")
-                    st.markdown("**Summary**")
-                    st.write(report.get('summary', 'No summary available.'))
-        return
+    if "unknown" in grouped:
+        st.markdown("### Other Reports")
+        for report in grouped["unknown"]:
+            with st.expander(f"{report.get('filename')} ({report.get('type')})"):
+                st.write(f"**Uploaded by:** {report.get('owner')}")
+                st.write(f"**Role:** {report.get('role')}")
+                st.write(f"**Uploaded at:** {report.get('uploaded_at')}")
+                st.markdown("**Summary**")
+                st.write(report.get('summary', 'No summary available.'))
+    return
 
 
 # chat interface
 def chat_interface():
     st.subheader("Ask a medical healthcare question:")
+    use_groq = False
+    if os.getenv("MEDIGUIDE_WALKTHROUGH") != "1":
+        use_groq = st.checkbox("Send this question and the retrieved report excerpts to Groq", key="use_groq")
     msg = st.text_input("Your query")
 
     if st.button("Send"):
         if not msg.strip():
-            st.warning("Please enter a query!")
-            return  # FIX #3: early return so we don't send empty query
+            st.warning("Enter a question.")
+            return
 
-        res = requests.post(f"{URL}/chat", json={"query": msg, "top_k": 5}, auth=get_auth())
+        reply = {"answer": "", "sources": [], "complete": False}
+        st.session_state.last_reply = reply
+        live = st.empty()
+        try:
+            with requests.post(f"{URL}/chat/stream", json={"query": msg, "top_k": 5,
+                               "provider": "groq" if use_groq else "ollama"},
+                               auth=get_auth(), stream=True, timeout=(5, 90)) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    item = json.loads(line)
+                    if item["type"] == "text":
+                        reply["answer"] += item["text"]
+                        live.text(reply["answer"])
+                    elif item["type"] == "sources":
+                        reply["sources"] = item["sources"]
+                    elif item["type"] == "done":
+                        reply["complete"] = True
+                        break
+                    elif item["type"] == "error":
+                        break
+        except (requests.RequestException, ValueError, KeyError):
+            pass
+        live.empty()
 
-        if res.status_code == 200:
-            reply = res.json()
-            st.markdown("### Answer: ")
-            st.success(reply["answer"])
-
-            if reply.get("sources"):
-                for src in reply["sources"]:
-                    st.write(f"--{src}")
-        else:
-            # FIX #2: this else now correctly catches non-200 responses
-            st.error(res.json().get("detail", "Something went wrong."))
+    reply = st.session_state.get("last_reply")
+    if reply:
+        st.text(reply["answer"])
+        if not reply["complete"]:
+            st.warning("Answer incomplete. Send the question again to retry.")
+        for number, source in enumerate(reply["sources"], 1):
+            page = source.get("page")
+            label = f"[{number}] {source['source']}"
+            if isinstance(page, int):
+                label += f" - Page {page + 1}"
+            with st.expander(label):
+                st.text(source["excerpt"])
+                if isinstance(page, int) and st.button("Read full page", key=f"page_{number}"):
+                    try:
+                        response = requests.get(f"{URL}/docs/reports/{source['doc_id']}/pages/{page + 1}",
+                                                auth=get_auth(), timeout=(5, 30))
+                        response.raise_for_status()
+                        st.text(response.json()["text"])
+                    except (requests.RequestException, ValueError, KeyError):
+                        st.warning("The original page is unavailable.")
 
 
 if not st.session_state.logged_in:
@@ -211,6 +266,8 @@ else:
     st.markdown(f"**Role**: {st.session_state.role}")
 
     if st.button("Logout"):
+        st.session_state.pop("last_reply", None)
+        st.session_state.pop("use_groq", None)
         st.session_state.logged_in = False
         st.session_state.username = ""
         st.session_state.password = ""
@@ -236,6 +293,37 @@ else:
 
         with tab4:
             chat_interface()
+
+        with st.expander("Compare AI providers on a fictional report"):
+            route = st.selectbox("Provider", ["auto", "groq", "gemini", "openrouter"])
+            case = st.selectbox("Example", ["sample_a", "sample_b", "missing"])
+            if st.button("Run provider demo"):
+                try:
+                    response = requests.post(f"{URL}/chat/demo/{route}/{case}", auth=get_auth(), timeout=(5, 45))
+                    response.raise_for_status()
+                    demo = response.json()
+                    st.text(demo["document"])
+                    st.text(demo["question"])
+                    for attempt in demo["attempts"]:
+                        provider = attempt["provider"]
+                        if attempt["status"] == "unconfigured":
+                            st.info(f"{provider} needs a server API key and model ID.")
+                        elif attempt["status"] != "ok":
+                            st.warning(f"{provider} request failed ({attempt['status']}).")
+                        else:
+                            answer = attempt["answer"]
+                            if answer["value"] is None:
+                                st.write("The model found no recorded value.")
+                            else:
+                                st.text(f"{answer['value']} {answer['unit']} (page {answer['page']})")
+                            st.caption(f"{provider} / {attempt['model']} | First text {attempt['first_text_s']:.2f}s"
+                                       f" | Complete {attempt['total_s']:.2f}s")
+                            if attempt["value_unit_correct"] and attempt["citation_correct"]:
+                                st.success("Value, unit and page match the fixture.")
+                            else:
+                                st.warning("The answer differs from the fixture.")
+                except (requests.RequestException, ValueError):
+                    st.error("The provider demo could not finish.")
 
     elif st.session_state.role == "patient":
         st.markdown("## Patient dashboard")

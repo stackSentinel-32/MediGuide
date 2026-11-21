@@ -3,6 +3,8 @@ Shared services module — single source of truth for embeddings,
 vector store, and LLM initialization across the entire server.
 """
 
+from contextlib import contextmanager
+from threading import Condition
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -20,7 +22,7 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
-UPLOAD_DIR = "./uploaded_docs"
+UPLOAD_DIR = os.getenv("UPLOAD_DIR") or str(Path(__file__).resolve().parents[1] / "uploaded_docs")
 
 if not EMBEDDING_MODEL or not CHROMA_PERSIST_DIR:
     raise RuntimeError("EMBEDDING_MODEL or CHROMA_PERSIST_DIR not set in .env")
@@ -81,9 +83,28 @@ def get_llm():
     return _llm
 
 
+_generation_gate = Condition()
+_active_chats = 0
+
+
+@contextmanager
+def interactive_generation():
+    global _active_chats
+    with _generation_gate:
+        _active_chats += 1
+    try:
+        yield
+    finally:
+        with _generation_gate:
+            _active_chats -= 1
+            _generation_gate.notify_all()
+
+
 def invoke_llm(prompt: str) -> str:
     """Invoke the LLM with a prompt string and return the response."""
     try:
+        with _generation_gate:
+            _generation_gate.wait_for(lambda: _active_chats == 0)
         return get_llm().invoke(prompt)
     except Exception as exc:
         raise RuntimeError(f"LLM invocation failed: {exc}") from exc

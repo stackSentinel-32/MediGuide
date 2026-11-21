@@ -20,4 +20,4 @@ This directory contains database connection logic and server configuration.
 ## Notes
 
 - `MONGODB_URI` may use `mongodb://localhost:27017` or an Atlas connection string.
-- The server will still start with a mock database if MongoDB cannot be reached.
+- Set MEDIGUIDE_MOCK_DB=1 to allow an isolated demo to start without MongoDB.

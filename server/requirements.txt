@@ -38,3 +38,5 @@ bcrypt
 
 # TLS certificates (for MongoDB Atlas)
 certifi
+mongomock
+httpx

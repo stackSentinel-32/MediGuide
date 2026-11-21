@@ -8,48 +8,60 @@ from pathlib import Path
 from ..services import (
     get_vectorstore,
     invoke_llm,
-    UPLOAD_DIR,
 )
 
 
-def save_upload_file(uploaded_file) -> Path:
-    save_path = Path(UPLOAD_DIR) / uploaded_file.filename
-    content = uploaded_file.file.read()
-    save_path.write_bytes(content)
-    return save_path
+def parse_pdf(file_path: Path):
+    from langchain_core.documents import Document
+    from pypdf import PdfReader
+
+    with file_path.open("rb") as source:
+        reader = PdfReader(source)
+        return [Document(page_content=page.extract_text() or "", metadata={"page": i})
+                for i, page in enumerate(reader.pages)]
 
 
-def load_vectorstore(file_path: str, filename: str, role: str, doc_id: str):
-    """
-    Loads a PDF file, splits it into chunks,
-    embeds the text, and stores it in ChromaDB.
-    """
-    from langchain_community.document_loaders import PyPDFLoader
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
+def page_chunks(documents, size, overlap=100):
+    """Keep page provenance and prefer whitespace near each chunk boundary."""
+    if size < 1 or not 0 <= overlap < size:
+        raise ValueError("Chunk overlap must be nonnegative and smaller than the chunk size")
+    for page in documents:
+        text = page.page_content.strip()
+        start = 0
+        while start < len(text):
+            end = min(start + size, len(text))
+            if end < len(text):
+                midpoint = start + max(size // 2, overlap)
+                boundary = text.rfind("\n", midpoint, end)
+                if boundary < midpoint:
+                    boundary = text.rfind(" ", midpoint, end)
+                if boundary >= midpoint:
+                    end = boundary + 1
+            chunk = text[start:end].strip()
+            if chunk:
+                yield chunk, page.metadata.get("page", 0)
+            if end == len(text):
+                break
+            start = end - overlap
+
+
+def load_vectorstore(documents, filename: str, role: str, doc_id: str):
     from tqdm.auto import tqdm
 
-    loader = PyPDFLoader(file_path)
-    documents = loader.load()
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=100
-    )
-    chunks = splitter.split_documents(documents)
-
+    chunks = list(page_chunks(documents, 500))
     if not chunks:
         return
 
-    texts = [chunk.page_content for chunk in chunks]
+    texts = [text for text, _ in chunks]
     ids = [f"{doc_id}-{i}" for i in range(len(chunks))]
     metadatas = [
         {
             "source": filename,
             "doc_id": doc_id,
             "role": role,
-            "page": chunk.metadata.get("page", 0)
+            "page": page
         }
-        for chunk in chunks
+        for _, page in chunks
     ]
 
     print(f"Processing {filename}")
@@ -69,48 +81,30 @@ def load_vectorstore(file_path: str, filename: str, role: str, doc_id: str):
         raise RuntimeError(f"Failed to save document vectors: {exc}") from exc
 
 
-def summarize_pdf(file_path: str) -> str:
-    from langchain_community.document_loaders import PyPDFLoader
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-    try:
-        loader = PyPDFLoader(file_path)
-        documents = loader.load()
-    except Exception as exc:
-        return f"Unable to read PDF for summary: {exc}"
-
-    if not documents:
-        return "No content found in the uploaded PDF."
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1200,
-        chunk_overlap=100
-    )
-    chunks = splitter.split_documents(documents)
-
-    if not chunks:
-        return "Unable to extract text from the uploaded PDF."
-
-    summaries = []
-    for index, chunk in enumerate(chunks):
-        prompt = f"""
+def summarize_section(text):
+    prompt = f"""
 You are a medical report summarization assistant.
 Read the following excerpt from a medical report and create a concise summary in plain language.
 Do not hallucinate. Preserve the meaning exactly.
 
 Excerpt:
-{chunk.page_content}
+{text}
 """
-        try:
-            summaries.append(invoke_llm(prompt))
-        except RuntimeError as llm_error:
-            fallback = chunk.page_content.strip()
-            if len(fallback) > 500:
-                fallback = fallback[:500] + "..."
-            summaries.append(
-                f"[AI unavailable] Extracted text fallback:\n{fallback}"
-            )
+    return invoke_llm(prompt)
 
+
+def summarize_pdf(documents) -> str:
+    from concurrent.futures import ThreadPoolExecutor
+
+    text = "\n\n".join(page.page_content.strip() for page in documents if page.page_content.strip())
+    if not text:
+        return "Unable to extract text from the uploaded PDF."
+    if len(text) <= 3600:
+        return summarize_section(text)
+
+    sections = (section for section, _ in page_chunks(documents, 2400))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        summaries = list(pool.map(summarize_section, sections))
     if len(summaries) == 1:
         return summaries[0]
 
@@ -122,7 +116,4 @@ Partial summaries:
 {joined}
 """
 
-    try:
-        return invoke_llm(final_prompt)
-    except RuntimeError:
-        return joined
+    return invoke_llm(final_prompt)
