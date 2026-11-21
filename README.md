@@ -1,118 +1,101 @@
-# 🩺 MediGuide – AI Medical Assistant (MVP)
+# MediGuide
 
-**MediGuide** is an AI-based medical assistant built with **FastAPI**, **Streamlit**, **MongoDB**, and **LangChain**. It connects a lightweight web UI to an API backend that stores user data, uploads medical documents, creates semantic embeddings, and answers user questions using vector search.
+MediGuide turns an uploaded report into searchable, page-cited answers. A patient can ask about a measurement as soon as indexing finishes, while a separate worker prepares the summary.
 
----
+## Try it locally
 
-## 📂 Project Structure
+From the repository root, create a Python 3.12 virtual environment with `python -m venv .venv`. Activate it with `.\.venv\Scripts\Activate.ps1` in PowerShell or `source .venv/bin/activate` in Bash.
 
-- `/client` – Streamlit frontend that handles user authentication, uploads, and chat.
-- `/server` – FastAPI backend with authentication, document upload, vectorization, and chat endpoints.
-- `/server/auth` – Authentication routes and login/signup logic.
-- `/server/docs` – PDF upload, summarization, and metadata storage.
-- `/server/chat` – Question answering endpoint and RAG query logic.
-- `/server/config` – MongoDB configuration and database connection.
-- `/server/chroma_db` and `/chroma_db` – ChromaDB persistence stores for embeddings.
-- `/uploaded_docs` and `/server/uploaded_docs` – Saved uploaded PDF files.
-
----
-
-## 🔌 How It Works
-
-1. The **Streamlit client** reads `BASE_URL` from the root `.env` file and sends HTTP requests to the FastAPI server.
-2. The server exposes three main areas:
-   - `/signup` and `/login` for user authentication.
-   - `/docs` for document upload, report summary, and listing saved documents.
-   - `/chat` for role-based medical question answering.
-3. Each upload is saved in `uploaded_docs/` and then processed by the server:
-   - PDFs are parsed, split into text chunks, and embedded with HuggingFace embeddings.
-   - The vectors are persisted into ChromaDB.
-   - Medical reports are also summarized through an Ollama LLM.
-4. Authenticated users can query the chat endpoint, which performs a similarity search over role-specific document vectors and returns an answer with sources.
-
----
-
-## ⚙️ Environment Setup
-
-### Server environment (`server/.env`)
-
-This file is required by the FastAPI backend and includes:
-
-- `MONGODB_URI` – MongoDB connection URI (local or Atlas)
-- `MONGODB_DB_NAME` – Database name
-- `OLLAMA_BASE_URL` – Ollama server URL
-- `OLLAMA_MODEL` – Ollama model name
-- `EMBEDDING_MODEL` – HuggingFace embedding model
-- `CHROMA_PERSIST_DIR` – Chroma persistence directory
-
-Example values are already present in `server/.env` in this workspace.
-
-### Client environment (`.env`)
-
-The Streamlit client uses the root `.env` file and requires:
-
-- `BASE_URL` – URL of the running FastAPI server
-
-Example:
-
-```env
-BASE_URL=http://127.0.0.1:8001
+```sh
+python -m pip install -r demo/requirements.txt
+python -m demo
 ```
 
-> If you run the server on port `8001`, make sure `BASE_URL` matches that port.
+Open [the local walkthrough](http://127.0.0.1:8501). Use `python -m demo --port 8502` if the default port is occupied. Ctrl+C ends the session.
 
----
+The walkthrough runs the Streamlit UI, FastAPI, PDF parser, background workers, Chroma search and access checks locally. Its database is temporary. A scripted extractor answers questions about the two fictional samples using the retrieved passages. Test embeddings replace the downloaded embedding model. The walkthrough needs no account with an AI provider.
 
-## ▶️ Run Locally
+## Two-minute walkthrough
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r server/requirements.txt
-pip install -r client/requirements.txt
-uvicorn server.main:app --reload --port 8001
-streamlit run client/main.py
+| Time | Action | What to look for |
+| --- | --- | --- |
+| 0:00–0:25 | Download the sample report from the app, create a patient account, then log in. | The two-page PDF records different volumes for samples A and B. [Open the sample](demo/specimen-log.pdf) |
+| 0:25–0:50 | In **Upload Report**, select the PDF and choose **Upload and Summarize**. Open **My Reports** and refresh. | The API accepts the upload, then the worker indexes it. A small report can finish summarizing before the first refresh. |
+| 0:50–1:20 | Open **Chat** and ask **What volume was recorded for sample B?** | The answer is **6 mL**. Expand the numbered source cited in the answer. |
+| 1:20–1:40 | Select **Read full page**. | Page **2** contains the original sentence. Page 1 records **4 mL** for a different sample. |
+| 1:40–2:00 | Ask **What temperature was recorded for sample B?** | The replay reports that the measurement is absent. Re-uploading the same PDF under this account reuses the original report ID. |
+
+For a terminal replay, run `python -m demo --check`. It signs up a temporary patient, uploads the bundled PDF, reads a streamed answer, follows its citation, and verifies the value against the original page.
+
+## Architecture
+
+The diagram shows the default Ollama workflow. Start at **FastAPI** on the left for uploads and at **Chat retrieval** near the lower right for questions.
+
+[![MediGuide architecture showing PDF storage, page indexing in Chroma, background summarization, and a cited answer streamed to Streamlit.](docs/images/mediguide-architecture.png)](docs/images/mediguide-architecture.png)
+
+Select the diagram to view it at full size.
+
+1. **Upload and index.** FastAPI saves the PDF and queues a job in MongoDB. The index worker splits the text into passages, keeps each passage's page number, and indexes them in Chroma. The report is now ready for questions.
+2. **Summarize in the background.** A separate worker sends the extracted text to Ollama and saves the summary in MongoDB. A patient can use chat while this worker runs. If a worker stops mid-job, another can reclaim the job when its lease expires.
+3. **Ask and verify.** MongoDB identifies which documents the patient can access. Chat searches those documents in Chroma and passes numbered excerpts to Ollama. FastAPI streams the answer to Streamlit. Selecting a citation opens the original page so the patient can check the wording.
+
+Patients can also select Groq in Chat to send their question and authorized excerpts to that service. The admin comparison uses predefined fictional cases with Groq, Gemini and OpenRouter. [Provider configuration and comparison](server/README.md)
+
+<details>
+<summary>View the Mermaid version</summary>
+
+```mermaid
+flowchart LR
+    UI[Streamlit] --> API[FastAPI]
+    API -->|save PDF| Disk[Document storage]
+    API -->|queue job| DB[(MongoDB)]
+    DB -->|claim| Index[Index worker]
+    Disk -->|parse once| Index
+    Index -->|page-tagged chunks| V[(Chroma)]
+    Index -->|mark searchable| DB
+    DB -->|claim indexed report| Summary[Summary worker]
+    Summary -->|generate summary| Model[Ollama]
+    Summary -->|save summary| DB
+    API -->|question and user| Search[Chat retrieval]
+    DB -->|authorized document IDs| Search
+    Search --> V
+    Search -->|numbered excerpts| Model
+    Model -->|stream via API| UI
+    API -->|authorized source page| Disk
 ```
 
-Then open:
+</details>
 
-- FastAPI docs: `http://127.0.0.1:8001/docs`
-- Streamlit app: `http://127.0.0.1:8501`
+## Measured performance
 
----
+A local run on **21 November 2026** used Windows 11, Python 3.12.10 and an Intel Core i5-13450HX. One client submitted ten distinct five-page text PDFs sequentially. Timings start immediately before the in-process HTTP upload. Searchable time includes polling for the indexed state.
 
-## 🔗 Connection Flow
+| Measurement | Observed |
+| --- | ---: |
+| Upload acknowledgement across ten reports | 4–9 ms |
+| First report searchable | 229 ms |
+| Next nine reports searchable | 28–136 ms (median 33 ms) |
 
-- The **client** uses `requests` with HTTP Basic auth to communicate with the FastAPI server.
-- The **server** verifies credentials via `server/auth/routes.py`.
-- Uploaded documents are stored in `uploaded_docs/` and indexed with Chroma in `chroma_db/`.
-- Chat questions are answered by searching the vector store and invoking an LLM.
-- MongoDB stores users, report metadata, and role access information.
+Before adding worker notifications, the same workload took 715 ms for the first report and a median of 533 ms for the next nine. Workers now wake after a job is recorded and still poll for interrupted jobs.
 
----
+Reproduce with `python -m server.benchmark_reports`. The benchmark uses real PDF extraction, chunking and Chroma writes, an in-memory MongoDB substitute, deterministic test embeddings and simulated model responses. It holds the first summary open while checking chat. These measurements describe local ingestion. Live model latency, answer quality and provider costs require separate runs.
 
-## 📌 Important Notes
+## Regression checks
 
-- The client expects `BASE_URL` to point to the running FastAPI server.
-- The server expects `server/.env` to contain valid model, Chroma, and MongoDB settings.
-- `server/config/db.py` will fall back to a mock database if MongoDB is unavailable.
+```sh
+python -m server.check_upgrade
+```
 
----
+The suite exercises signup restrictions, patient isolation, source-page authorization, streaming and interruption handling, provider fallback, the walkthrough fixture, deduplication and worker recovery. GitHub Actions runs the same command on pushes and pull requests. [CI workflow](.github/workflows/regression.yml)
 
-## 🗂 README Files in Each Folder
+## Run with MongoDB and Ollama
 
-This workspace now includes README documentation in these directories:
+Install the dependencies in [server/requirements.txt](server/requirements.txt) and [client/requirements.txt](client/requirements.txt). Start MongoDB and Ollama with your chosen model installed. Configure `server/.env` with `MONGODB_URI`, `MONGODB_DB_NAME`, `EMBEDDING_MODEL`, `CHROMA_PERSIST_DIR`, `OLLAMA_BASE_URL` and `OLLAMA_MODEL`. Set `BASE_URL=http://127.0.0.1:8001` in the root `.env`.
 
-- `/client`
-- `/server`
-- `/server/auth`
-- `/server/chat`
-- `/server/config`
-- `/server/docs`
-- `/server/chroma_db`
-- `/server/uploaded_docs`
-- `/chroma_db`
-- `/uploaded_docs`
+Start the API with `python -m uvicorn server.main:app --port 8001`. In a second terminal, run `python -m streamlit run client/main.py`. This path uses persistent storage, Hugging Face embeddings and Ollama for patient chat and summaries. [Document processing and retries](server/docs/README.md)
 
-Each README explains the folder responsibility and how it connects to the rest of MediGuide.
----
+
+To verify Groq with the bundled synthetic PDF, configure GROQ_MODEL and GROQ_API_KEY
+in server/.env, then run `python -m demo --check-groq`. This opt-in check uses
+a real network request, prints first-text and completion times, and checks the
+model citation against page 2. Offline regression checks use simulated responses.
