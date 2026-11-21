@@ -15,16 +15,6 @@ Open [the local walkthrough](http://127.0.0.1:8501). Use `python -m demo --port 
 
 The walkthrough runs the Streamlit UI, FastAPI, PDF parser, background workers, Chroma search and access checks locally. Its database is temporary. A scripted extractor answers questions about the two fictional samples using the retrieved passages. Test embeddings replace the downloaded embedding model. The walkthrough needs no account with an AI provider.
 
-## Two-minute walkthrough
-
-| Time | Action | What to look for |
-| --- | --- | --- |
-| 0:00–0:25 | Download the sample report from the app, create a patient account, then log in. | The two-page PDF records different volumes for samples A and B. [Open the sample](demo/specimen-log.pdf) |
-| 0:25–0:50 | In **Upload Report**, select the PDF and choose **Upload and Summarize**. Open **My Reports** and refresh. | The API accepts the upload, then the worker indexes it. A small report can finish summarizing before the first refresh. |
-| 0:50–1:20 | Open **Chat** and ask **What volume was recorded for sample B?** | The answer is **6 mL**. Expand the numbered source cited in the answer. |
-| 1:20–1:40 | Select **Read full page**. | Page **2** contains the original sentence. Page 1 records **4 mL** for a different sample. |
-| 1:40–2:00 | Ask **What temperature was recorded for sample B?** | The replay reports that the measurement is absent. Re-uploading the same PDF under this account reuses the original report ID. |
-
 For a terminal replay, run `python -m demo --check`. It signs up a temporary patient, uploads the bundled PDF, reads a streamed answer, follows its citation, and verifies the value against the original page.
 
 ## Architecture
