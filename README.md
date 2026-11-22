@@ -89,3 +89,27 @@ To verify Groq with the bundled synthetic PDF, configure GROQ_MODEL and GROQ_API
 in server/.env, then run `python -m demo --check-groq`. This opt-in check uses
 a real network request, prints first-text and completion times, and checks the
 model citation against page 2. Offline regression checks use simulated responses.
+
+## Report selection and cloud summaries
+
+Choose **Ask about this report** in My Reports, then open Chat. The selector
+shows the filename and upload date. Select **All accessible documents** to
+search across reports and shared references. Existing API clients may omit
+doc_id for that broader search. A selected inaccessible report returns 404.
+
+For a Groq-only installation, set CHAT_PROVIDER=groq and SUMMARY_PROVIDER=groq
+in server/.env alongside GROQ_API_KEY and GROQ_MODEL. The default policy,
+choice, permits both local and cloud requests. Select the Groq checkbox at
+upload to send extracted text for summarization and select Groq in Chat to
+send the authorized excerpts. The worker stores the upload choice for retries.
+Local reports keep their local summary setting. Ollama settings are only
+needed for local generation. MongoDB and the embedding model are still required
+by the persistent application. Run `python -m server.check_database` to verify
+the configured MongoDB connection and report collection read access.
+
+Run python -m demo.check_reports for the two-report isolation fixture and
+python -m demo --check-groq for live summary, streaming, timing and citation
+verification on fictional data. Both use temporary storage. Run
+python -m server.provider_check all to score the configured services on
+identical inputs. Cost per verified answer requires billing usage or configured
+input and output token rates.
