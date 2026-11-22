@@ -43,7 +43,7 @@ class ChatChecks(unittest.TestCase):
         cls.addClassCleanup(stack.close)
         root = Path(stack.enter_context(TemporaryDirectory()))
         stack.enter_context(patch.dict(os.environ, {
-            "MEDIGUIDE_MOCK_DB": "1", "MONGODB_URI": "mongodb://localhost",
+            "CHAT_PROVIDER":"choice", "SUMMARY_PROVIDER":"choice", "MEDIGUIDE_MOCK_DB": "1", "MONGODB_URI": "mongodb://localhost",
             "EMBEDDING_MODEL": "fake", "CHROMA_PERSIST_DIR": str(root / "index"),
             "UPLOAD_DIR": str(root), "OLLAMA_MODEL": "fake", "OLLAMA_BASE_URL": "http://127.0.0.1:1"}))
         with patch("pymongo.MongoClient", side_effect=ConnectionFailure("offline test")):
