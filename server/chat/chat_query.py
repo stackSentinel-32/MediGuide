@@ -13,9 +13,12 @@ def access_queries(role, username):
     ]
 
 
-def prepare_answer(query, top_k, role, username):
+def prepare_answer(query, top_k, role, username, doc_id=None):
     allowed = [row["doc_id"] for access in access_queries(role, username)
-               for row in reports_collection.find(access, {"doc_id": 1})]
+               for row in reports_collection.find({**access, **({"doc_id": doc_id} if doc_id else {})}, {"doc_id": 1})]
+    if doc_id is not None and doc_id not in allowed:
+        from fastapi import HTTPException
+        raise HTTPException(404, "Report unavailable.")
     if not allowed:
         return "", []
     docs = get_vectorstore().similarity_search(query=query, k=top_k, filter={"doc_id": {"$in": allowed}})
@@ -42,8 +45,8 @@ def prepare_answer(query, top_k, role, username):
     return prompt, sources
 
 
-def answer_query(query, top_k, role, username):
-    prompt, sources = prepare_answer(query, top_k, role, username)
+def answer_query(query, top_k, role, username, doc_id=None):
+    prompt, sources = prepare_answer(query, top_k, role, username, doc_id)
     if not sources:
         return {"answer": NO_EVIDENCE, "sources": []}
     with interactive_generation():
