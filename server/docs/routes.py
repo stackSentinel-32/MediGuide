@@ -1,4 +1,6 @@
 from pathlib import Path
+from typing import Literal
+from ..providers import configured, require_allowed_provider
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel
 
@@ -73,13 +75,17 @@ def upload_document(
 
 @router.post("/report", status_code=202)
 def upload_medical_report(
+    summary_provider: Literal["ollama", "groq"] = Form("ollama"),
     file: UploadFile = File(...),
     user=Depends(authentication)
 ):
     if user["role"] != "patient":
         raise HTTPException(status_code=403, detail="Only patients can upload their medical reports.")
 
-    return enqueue(file, user["username"])
+    require_allowed_provider("summary", summary_provider)
+    if summary_provider == "groq" and not configured("groq"):
+        raise HTTPException(503, "Groq summary requires a configured key and model.")
+    return enqueue(file, user["username"], summary_provider)
 
 
 @router.post("/reports/{doc_id}/retry", status_code=202)
