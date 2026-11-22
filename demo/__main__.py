@@ -30,11 +30,11 @@ class DocumentReplay:
     def invoke(self, prompt):
         evidence, separator, question = prompt.rpartition("\n\nQuestion: ")
         if not separator:
-            return " ".join(re.findall(r"Sample [AB] volume was [0-9]+ mL\.", prompt))
+            return " ".join(re.findall(r"Sample [AB] volume was [0-9]+ (?:mL|L)\.", prompt))
         sample = re.search(r"\bsample ([ab])\b", question, re.I)
         if sample and "volume" in question.lower():
             for number, excerpt in re.findall(r"\n\[(\d+)\] (.*?)(?=\n\[\d+\] |\Z)", evidence, re.S):
-                fact = re.search(rf"Sample {sample[1].upper()} volume was [0-9]+ mL\.", excerpt)
+                fact = re.search(rf"Sample {sample[1].upper()} volume was [0-9]+ (?:mL|L)\.", excerpt)
                 if fact:
                     return f"{fact[0]} [{number}]"
         return "The supplied pages do not contain that measurement."
@@ -46,11 +46,12 @@ class DocumentReplay:
 
 
 @contextmanager
-def local_app():
+def local_app(cloud_only=False):
     with TemporaryDirectory() as directory, patch.dict(os.environ, {
         "UPLOAD_DIR": directory, "CHROMA_PERSIST_DIR": directory, "EMBEDDING_MODEL": "demo",
-        "MONGODB_URI": "mongodb://127.0.0.1", "MEDIGUIDE_MOCK_DB": "1", "OLLAMA_MODEL": "demo",
-        "OLLAMA_BASE_URL": "http://127.0.0.1:1", "GROQ_API_KEY": "", "OPENROUTER_API_KEY": "", "GEMINI_API_KEY": ""
+        "MONGODB_URI": "mongodb://127.0.0.1", "MEDIGUIDE_MOCK_DB": "1", "OLLAMA_MODEL": "" if cloud_only else "demo",
+        "CHAT_PROVIDER": "groq" if cloud_only else "choice", "SUMMARY_PROVIDER": "groq" if cloud_only else "choice",
+        "OLLAMA_BASE_URL": "" if cloud_only else "http://127.0.0.1:1", "GROQ_API_KEY": "", "OPENROUTER_API_KEY": "", "GEMINI_API_KEY": ""
     }):
         with patch("pymongo.MongoClient", side_effect=ConnectionFailure("temporary demo database")):
             from server.main import app
@@ -121,7 +122,8 @@ def check_groq(app, config):
     with serve(app) as url, patch.dict(os.environ, config), requests.Session() as api:
         api.auth = ("reviewer", "demo-session")
         api.post(url + "/signup", json={"username": api.auth[0], "password": api.auth[1]}, timeout=5).raise_for_status()
-        upload = api.post(url + "/docs/report", files={"file": (SAMPLE.name, SAMPLE.read_bytes())}, timeout=10)
+        upload_start = monotonic()
+        upload = api.post(url + "/docs/report", data={"summary_provider": "groq"}, files={"file": (SAMPLE.name, SAMPLE.read_bytes())}, timeout=10)
         upload.raise_for_status()
         report = url + "/docs/reports/" + upload.json()["doc_id"]
         deadline = monotonic() + 30
@@ -130,11 +132,12 @@ def check_groq(app, config):
                 raise RuntimeError("Index timeout")
             sleep(.05)
 
+        searchable = monotonic() - upload_start
         start = monotonic()
         first = None
         words = []
         sources = []
-        with api.post(url + "/chat/stream", json={"provider":"groq", "query":QUESTION},
+        with api.post(url + "/chat/stream", json={"provider":"groq", "query":QUESTION, "doc_id":upload.json()["doc_id"]},
                       stream=True, timeout=40) as response:
             response.raise_for_status()
             completed = False
@@ -149,7 +152,7 @@ def check_groq(app, config):
                 elif event["type"] == "done":
                     completed = True
         answer = "".join(words)
-        print(json.dumps({"answer": answer, "model": config["GROQ_MODEL"], "first_text_s": first,
+        print(json.dumps({"answer": answer, "model": config["GROQ_MODEL"], "upload_to_searchable_s":searchable, "first_text_s": first,
                           "total_s": monotonic() - start}), flush=True)
         citations = re.findall(r"\[(\d+)\]", answer)
         assert completed and citations and re.search(r"6\s*mL", answer, re.I), "Unverified model answer"
@@ -158,6 +161,18 @@ def check_groq(app, config):
             page = sources[int(citation) - 1]["page"] + 1
             text = api.get(f"{report}/pages/{page}", timeout=5).json()["text"]
             if page == 2 and "Sample B volume was 6 mL." in text:
+                deadline = monotonic() + 90
+                while monotonic() < deadline:
+                    record = api.get(report, timeout=5).json()
+                    if record["status"] == "complete":
+                        assert record["summary_provider"] == "groq" and record["summary"].strip()
+                        break
+                    if record["status"].endswith("_failed"):
+                        raise RuntimeError(record["status"])
+                    sleep(.1)
+                else:
+                    raise RuntimeError("Cloud summary timed out")
+                print("Verified Groq summary and report-scoped chat.")
                 print("Verified live citation against specimen-log.pdf, page 2.")
                 return
         raise AssertionError("Cited pages did not support the answer")
@@ -176,7 +191,7 @@ if __name__ == "__main__":
         config = {k: settings.get(k) for k in ("GROQ_API_KEY", "GROQ_MODEL")}
         if not all(config.values()):
             parser.error("Configure GROQ_API_KEY and GROQ_MODEL for the live check")
-    with local_app() as application:
+    with local_app(cloud_only=args.check_groq) as application:
         if args.check_groq:
             check_groq(application, config)
         elif args.check:
