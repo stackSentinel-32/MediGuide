@@ -24,6 +24,15 @@ def configured(provider):
     return all(os.getenv(f"{prefix}_{field}") for field in ("API_KEY", "MODEL"))
 
 
+def require_allowed_provider(task, provider):
+    from fastapi import HTTPException
+    setting = os.getenv(task.upper() + "_PROVIDER", "choice")
+    if setting not in ("choice", "ollama", "groq"):
+        raise HTTPException(503, f"Invalid {task} provider configuration.")
+    if setting != "choice" and setting != provider:
+        raise HTTPException(422, f"This installation requires {setting} for {task}. Select it explicitly.")
+
+
 async def measure(client, provider, case, budget=18):
     prefix = provider.upper()
     model = os.getenv(f"{prefix}_MODEL")
@@ -36,6 +45,8 @@ async def measure(client, provider, case, budget=18):
               'If absent, return null for all three fields.')
     body = {"model": model, "messages": [{"role": "user", "content": prompt}],
             "stream": True, "max_tokens": 160}
+    if provider == "groq" and model.startswith("openai/gpt-oss-"):
+        body.update(max_tokens=768, reasoning_effort="low", response_format={"type":"json_object"})
     if provider == "openrouter":
         body["provider"] = {"ignore": ["Groq"]}
         if upstream := os.getenv("OPENROUTER_UPSTREAM"):
@@ -84,7 +95,7 @@ async def measure(client, provider, case, budget=18):
                 or (answer["page"] is not None and type(answer["page"]) is not int)):
             raise ValueError("invalid field types")
         answer = {key: answer[key] for key in ("value", "unit", "page")}
-        result.update(status="ok", answer=answer, value_unit_correct=(answer["value"], answer["unit"]) == (value, unit),
+        result.update(status="ok", answer=answer, value_correct=answer["value"] == value, unit_correct=answer["unit"] == unit, value_unit_correct=(answer["value"], answer["unit"]) == (value, unit),
                       citation_correct=answer["page"] == page)
     except httpx.HTTPStatusError as exc:
         result["status"] = f"http_{exc.response.status_code}"
