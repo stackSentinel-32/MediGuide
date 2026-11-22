@@ -25,8 +25,13 @@ def stats(rows):
             report[metric] = {"p50": median(values), "p95": values[ceil(.95 * len(values)) - 1]}
         report["value_unit_accuracy"] = sum(r["value_unit_correct"] for r in ok) / len(ok)
         report["citation_accuracy"] = sum(r["citation_correct"] for r in ok) / len(ok)
+        report["value_accuracy"] = sum(r["value_correct"] for r in ok)/len(rows)
+        report["unit_accuracy"] = sum(r["unit_correct"] for r in ok)/len(rows)
+        verified = sum(r["value_unit_correct"] and r["citation_correct"] for r in ok)
+        report["verified"] = verified
         costs = [r.get("cost_usd", r.get("estimated_cost_usd")) for r in rows]
         report["usd_per_completion"] = sum(costs)/len(ok) if all(isinstance(c,(int,float)) for c in costs) else None
+        report["usd_per_verified_answer"] = sum(costs)/verified if verified and all(isinstance(c,(int,float)) for c in costs) else None
     return report
 
 
