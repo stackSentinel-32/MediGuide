@@ -81,7 +81,7 @@ def load_vectorstore(documents, filename: str, role: str, doc_id: str):
         raise RuntimeError(f"Failed to save document vectors: {exc}") from exc
 
 
-def summarize_section(text):
+def summarize_section(text, generate):
     prompt = f"""
 You are a medical report summarization assistant.
 Read the following excerpt from a medical report and create a concise summary in plain language.
@@ -90,21 +90,34 @@ Do not hallucinate. Preserve the meaning exactly.
 Excerpt:
 {text}
 """
-    return invoke_llm(prompt)
+    return generate(prompt)
 
 
-def summarize_pdf(documents) -> str:
+def summarize_pdf(documents, provider="ollama") -> str:
+    generate = invoke_llm
+    if provider == "groq":
+        import asyncio
+        from ..providers import groq_answer
+
+        async def collect(prompt):
+            return "".join([token async for token in groq_answer(prompt)])
+
+        def generate(prompt):
+            return asyncio.run(collect(prompt))
+    elif provider != "ollama":
+        raise ValueError("Unknown summary provider")
+
     from concurrent.futures import ThreadPoolExecutor
 
     text = "\n\n".join(page.page_content.strip() for page in documents if page.page_content.strip())
     if not text:
         return "Unable to extract text from the uploaded PDF."
     if len(text) <= 3600:
-        return summarize_section(text)
+        return summarize_section(text, generate)
 
     sections = (section for section, _ in page_chunks(documents, 2400))
     with ThreadPoolExecutor(max_workers=2) as pool:
-        summaries = list(pool.map(summarize_section, sections))
+        summaries = list(pool.map(lambda section: summarize_section(section, generate), sections))
     if len(summaries) == 1:
         return summaries[0]
 
@@ -116,4 +129,4 @@ Partial summaries:
 {joined}
 """
 
-    return invoke_llm(final_prompt)
+    return generate(final_prompt)
