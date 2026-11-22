@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 import json
 from typing import Literal
-from ..providers import configured, groq_answer
+from ..providers import configured, groq_answer, require_allowed_provider
 
 from ..auth.routes import authentication
 from ..services import get_llm, interactive_generation
@@ -14,6 +14,7 @@ router = APIRouter(prefix="/chat", tags=["Chat"])
 
 
 class ChatRequest(BaseModel):
+    doc_id: str | None = Field(default=None, min_length=1, max_length=128)
     provider: Literal["ollama", "groq"] = "ollama"
     query: str = Field(min_length=1, max_length=8000, pattern=r"\S")
     top_k: int = Field(default=5, ge=1, le=20)
@@ -21,8 +22,9 @@ class ChatRequest(BaseModel):
 
 @router.post("/")
 async def chat_endpoint(req: ChatRequest, user=Depends(authentication)):
+    require_allowed_provider("chat", req.provider)
     if req.provider == "ollama":
-        return await run_in_threadpool(answer_query, req.query, req.top_k, user["role"], user["username"])
+        return await run_in_threadpool(answer_query, req.query, req.top_k, user["role"], user["username"], req.doc_id)
     prompt, sources = await run_in_threadpool(prepare_request, req, user)
     if not sources:
         return {"answer": NO_EVIDENCE, "sources": []}
@@ -37,7 +39,9 @@ def prepare_request(req, user):
     if req.provider == "groq" and not configured("groq"):
         raise HTTPException(503, "Groq chat requires a server key and model ID.")
     try:
-        return prepare_answer(req.query, req.top_k, user["role"], user["username"])
+        return prepare_answer(req.query, req.top_k, user["role"], user["username"], req.doc_id)
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(503, "Document search unavailable.")
 
@@ -48,6 +52,7 @@ def event(kind, **fields):
 
 @router.post("/stream")
 def stream_chat(req: ChatRequest, user=Depends(authentication)):
+    require_allowed_provider("chat", req.provider)
     prompt, sources = prepare_request(req, user)
 
     async def events():
