@@ -96,10 +96,11 @@ def upload_report():
     st.subheader("Upload your medical report for summary")
     uploaded_file = st.file_uploader("Upload a medical PDF report", type=["pdf"], key="report_uploader")
 
+    cloud = os.getenv("MEDIGUIDE_WALKTHROUGH") != "1" and st.checkbox("Send this report text to Groq for its summary")
     if st.button("Upload and Summarize", key="upload_report"):
         if uploaded_file:
             files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
-            res = requests.post(f"{URL}/docs/report", files=files, auth=get_auth())
+            res = requests.post(f"{URL}/docs/report", data={"summary_provider":"groq" if cloud else "ollama"}, files=files, auth=get_auth())
 
             if res.status_code == 202:
                 st.success("Report saved. Open My Reports to check its progress.")
@@ -125,6 +126,10 @@ def view_reports(report_type=None):
 
     data = res.json()
     reports = data.get("reports", [])
+    if st.session_state.role == "patient":
+        st.session_state.chat_reports = {r["doc_id"]: f"{r['filename']} ({r.get('uploaded_at', '')[:10]})"
+                                         for r in reports if r.get("searchable", True)}
+
     if not reports:
         st.info("No uploaded reports found.")
         return
@@ -164,6 +169,10 @@ def view_reports(report_type=None):
                 st.write(f"**Uploaded by:** {report.get('owner')}")
                 st.write(f"**Role:** {report.get('role')}")
                 st.write(f"**Uploaded at:** {report.get('uploaded_at')}")
+                if st.session_state.role == "patient" and report.get("searchable", True):
+                    if st.button("Ask about this report", key="ask_" + report["doc_id"]):
+                        st.session_state.chat_scope = report["doc_id"]
+                        st.info("Open the Chat tab to ask about this report.")
                 status = report.get("status", "complete")
                 labels = {
                     "queued": "Waiting to index",
@@ -203,6 +212,12 @@ def chat_interface():
     use_groq = False
     if os.getenv("MEDIGUIDE_WALKTHROUGH") != "1":
         use_groq = st.checkbox("Send this question and the retrieved report excerpts to Groq", key="use_groq")
+    doc_id = None
+    if st.session_state.role == "patient":
+        reports = st.session_state.get("chat_reports", {})
+        scope = st.selectbox("Search in", [*reports, "all"], key="chat_scope",
+                             format_func=lambda k: reports.get(k, "All accessible documents"))
+        doc_id = None if scope == "all" else scope
     msg = st.text_input("Your query")
 
     if st.button("Send"):
@@ -210,13 +225,16 @@ def chat_interface():
             st.warning("Enter a question.")
             return
 
-        reply = {"answer": "", "sources": [], "complete": False}
+        reply = {"doc_id": doc_id, "answer": "", "sources": [], "complete": False}
         st.session_state.last_reply = reply
         live = st.empty()
         try:
-            with requests.post(f"{URL}/chat/stream", json={"query": msg, "top_k": 5,
+            with requests.post(f"{URL}/chat/stream", json={"doc_id": doc_id, "query": msg, "top_k": 5,
                                "provider": "groq" if use_groq else "ollama"},
                                auth=get_auth(), stream=True, timeout=(5, 90)) as response:
+                if response.status_code in (422, 503):
+                    st.error(str(response.json().get("detail", "Chat unavailable.")))
+                    return
                 response.raise_for_status()
                 for line in response.iter_lines():
                     if not line:
@@ -237,7 +255,7 @@ def chat_interface():
         live.empty()
 
     reply = st.session_state.get("last_reply")
-    if reply:
+    if reply and reply.get("doc_id") == doc_id:
         st.text(reply["answer"])
         if not reply["complete"]:
             st.warning("Answer incomplete. Send the question again to retry.")
@@ -267,7 +285,8 @@ else:
 
     if st.button("Logout"):
         st.session_state.pop("last_reply", None)
-        st.session_state.pop("use_groq", None)
+        for key in ("use_groq","chat_reports","chat_scope"):
+            st.session_state.pop(key, None)
         st.session_state.logged_in = False
         st.session_state.username = ""
         st.session_state.password = ""
