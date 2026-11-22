@@ -27,8 +27,7 @@ UPLOAD_DIR = os.getenv("UPLOAD_DIR") or str(Path(__file__).resolve().parents[1] 
 if not EMBEDDING_MODEL or not CHROMA_PERSIST_DIR:
     raise RuntimeError("EMBEDDING_MODEL or CHROMA_PERSIST_DIR not set in .env")
 
-if not OLLAMA_MODEL or not OLLAMA_BASE_URL:
-    raise RuntimeError("OLLAMA_MODEL or OLLAMA_BASE_URL not set in .env")
+
 
 # Ensure upload directory exists
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -72,6 +71,8 @@ def get_llm():
     """Return a cached OllamaLLM instance."""
     global _llm
     if _llm is None:
+        if not OLLAMA_MODEL or not OLLAMA_BASE_URL:
+            raise RuntimeError("Configure Ollama for local generation or select Groq.")
         try:
             from langchain_ollama import OllamaLLM
             _llm = OllamaLLM(
