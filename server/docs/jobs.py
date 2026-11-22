@@ -30,8 +30,10 @@ def now():
     return datetime.now(timezone.utc)
 
 
-def enqueue(file, owner):
+def enqueue(file, owner, summary_provider="ollama"):
     digest = hashlib.sha256(json.dumps(["report-v2", owner]).encode())
+    if summary_provider != "ollama":
+        digest.update(summary_provider.encode())
     size = 0
     with NamedTemporaryFile(dir=STORAGE, delete=False) as tmp:
         path = Path(tmp.name)
@@ -55,7 +57,7 @@ def enqueue(file, owner):
         except FileExistsError:
             pass
         record = dict(doc_id=doc_id, owner=owner, filename=file.filename, role="patient",
-                      type="patient_report", status="queued", searchable=False, summary="",
+                      type="patient_report", summary_provider=summary_provider, status="queued", searchable=False, summary="",
                       attempts=0, uploaded_at=now().isoformat())
         try:
             reports_collection.update_one({"_id": doc_id}, {"$setOnInsert": record}, upsert=True)
@@ -108,7 +110,7 @@ def process_one(stage):
         else:
             from langchain_core.documents import Document
             pages = [Document(page_content=t) for t in json.loads(pages_file.read_text(encoding="utf-8"))]
-            result = dict(status="complete", summary=summarize_pdf(pages), completed_at=now().isoformat())
+            result = dict(status="complete", summary=(summarize_pdf(pages, "groq") if job.get("summary_provider") == "groq" else summarize_pdf(pages)), completed_at=now().isoformat())
     except Exception as exc:
         logger.warning("Report %s %s attempt %s failed (%s)", doc_id, stage, job["attempts"], type(exc).__name__)
         result = {"status": pending if job["attempts"] < MAX_ATTEMPTS else f"{stage}_failed"}
