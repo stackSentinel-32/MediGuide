@@ -24,7 +24,7 @@ def sample(number):
 
 
 def run(directory):
-    os.environ.update(MEDIGUIDE_MOCK_DB="1", MONGODB_URI="mongodb://localhost", EMBEDDING_MODEL="synthetic",
+    os.environ.update(CHAT_PROVIDER="choice", SUMMARY_PROVIDER="choice", MEDIGUIDE_MOCK_DB="1", MONGODB_URI="mongodb://localhost", EMBEDDING_MODEL="synthetic",
                       CHROMA_PERSIST_DIR=str(directory / "index"), OLLAMA_MODEL="synthetic",
                       OLLAMA_BASE_URL="http://127.0.0.1:1")
     with patch("pymongo.MongoClient", side_effect=ConnectionFailure("isolated benchmark")):
